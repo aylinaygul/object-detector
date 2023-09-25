@@ -1,0 +1,103 @@
+version: '3'
+#docker network create --subnet=172.18.0.0/16 app-network
+
+networks:
+  app-network:
+    external: true
+
+services:
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.8.0
+    container_name: kibana
+    ports:
+      - 5601:5601
+    environment:
+      - ELASTICSEARCH_HOSTS=http://172.18.0.7:9200
+    networks:
+      app-network:
+        ipv4_address: 172.18.0.6
+
+  elasticsearch:
+    image: elasticsearch:8.8.0
+    ports:
+      - 9200:9200
+      - 9300:9300
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      
+    networks:
+      app-network:
+        ipv4_address: 172.18.0.7
+
+  reader:
+    build:
+      context: .
+      dockerfile: ./reader/Dockerfile-reader
+    depends_on:
+      - redis
+    environment:
+      HOST: redis
+      OUTPUT_QUEUE: "list"
+      QUEUE_LENGTH: 100
+      FPS: 0.2
+      FRAME_DIM: "640,640"
+    networks:
+      app-network:
+        ipv4_address: 172.18.0.8
+
+  detector:
+    build:
+      context: .
+      dockerfile: ./detector/Dockerfile-detector
+    depends_on:
+      - redis
+    environment:
+      HOST: redis
+      CONFIDENCE_THRESHOLD: 0.4
+      INPUT_QUEUE: "list"
+      OUTPUT_QUEUE: "result"
+      QUEUE_LENGTH: 500
+      INFERENCE_MODE: "gpu"
+      WIDTH: 360
+      HEIGHT: 170
+      MODEL_PATH: ./detector_src/config_files/yolov5s.onnx
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+  
+    networks:
+      app-network:
+        ipv4_address: 172.18.0.9
+        
+  processor:
+    build:
+      context: .
+      dockerfile: ./processor/Dockerfile-processor
+    depends_on:
+      - redis
+      - elasticsearch
+      - kibana
+    environment:
+      HOST: redis
+      INPUT_QUEUE: "result"
+      ELASTIC_HOST: http://172.18.0.7:9200
+      FUNCTION: |
+        def printObjects(resultList):
+            item = resultList[-1]
+            last_box = item[1][1]
+        printObjects(resultList)
+    networks:
+      - app-network
+
+  redis:
+    image: redis:latest
+    entrypoint: redis-server --appendonly yes
+    ports:
+      - 6379:6379
+    networks:
+      - app-network
+
